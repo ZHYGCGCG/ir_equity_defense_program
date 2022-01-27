@@ -4,13 +4,29 @@
 
 # COMMAND ----------
 
+# MAGIC %md ##To Do:
+# MAGIC #### Data
+# MAGIC - add returns data
+# MAGIC - add trailing window averages (by month)
+# MAGIC - lag of macroeconomic variables
+# MAGIC 
+# MAGIC ####Analysis
+# MAGIC - periods of high redemptions (above trailing averages)
+# MAGIC - correlation of macroeconomic with periods of high redemptions
+# MAGIC - money in motion, exchange in/out by asset category (where are equity assets going?)
+
+# COMMAND ----------
+
 # MAGIC %md ### Questions:
-# MAGIC New Fields that need to be explored (do these give us more coverage?)
+# MAGIC ####New Fields that need to be explored (do these give us more coverage?)
 # MAGIC  - 'dervd_invsr_acct_num',
 # MAGIC  - 'dervd_clrd_thru_org_num',
 # MAGIC  - 'dervd_plan_ptcpt_id',
 # MAGIC  - 'dervd_brkr_idfct_num',
 # MAGIC  - 'dervd_rtrmt_plan_id',
+# MAGIC  
+# MAGIC ####Do we count exchange out as a redemption?
+# MAGIC ####Do we need to break this out by share class? (e.g. R2 can be high redemption while R6 is stable)
 
 # COMMAND ----------
 
@@ -67,6 +83,7 @@ for file in dbutils.fs.ls(macroeconomic_file_location):
   globals()[file_standard] = spark.read.option("header",True).csv(macroeconomic_file_location + file.name)
 
 # cannot reduce with join function so applying manually
+# df.reduce((a,b) => a.join(b, Seq("id", "uid1")))
 macroeconomic_variables = \
 consumersentimentindex \
 .join(gdp, how = 'left', on = 'AsOfDate') \
@@ -131,13 +148,116 @@ target_org_ids.groupBy(col('org_nm_standard')).count().orderBy(col('count').desc
 
 # COMMAND ----------
 
-# MAGIC %md ### Filter Transaction Table
+# MAGIC %md ### Fund Returns
+# MAGIC - starting with all funds R6 returns because investment vehicle id does not match transaction table
+
+# COMMAND ----------
+
+# https://www.capitalgroup.com/individual/investments/fund/rgagx
+# Suffix list
+# R1 AX
+# R2 BX
+# R3 CX
+# R4 EX
+# R5 FX
+# R6 GX
+
+trading_symbols_data = [
+  ('GFA', 'RGAGX'),
+  ('EUPAC', 'RERGX'),
+  ('WMIF', 'RWMGX'),
+  ('FI', 'RFNGX'),
+  ('ICA', 'RICGX')
+]
+
+cols = ["fund_acrnm_cd","TradingSymbol"]
+trading_symbols = spark.createDataFrame(data=trading_symbols_data, schema = cols)
+
+# COMMAND ----------
+
+Operation_TradingExchange_TradingExchangeList = spark.read.format('parquet').options(header='true').load('adl://adlseastus2lasr.azuredatalakestore.net/lasr/sandbox/nad/zhyg/imc/data_inputs/Operation_TradingExchange_TradingExchangeList.parquet') \
+.select('InvestmentVehicleId','TradingSymbol') \
+.distinct()
+
+# COMMAND ----------
+
+target_trading_symbols = \
+trading_symbols \
+.join(Operation_TradingExchange_TradingExchangeList, on = 'TradingSymbol', how = 'inner')
+
+# COMMAND ----------
+
+fund_returns = spark.read.format('parquet').options(header='true').load('adl://adlseastus2lasr.azuredatalakestore.net/lasr/sandbox/nad/zhyg/imc/data_inputs/morningstar_fund_returns.parquet') \
+.join(target_trading_symbols, on = 'InvestmentVehicleId', how = 'inner') \
+.filter(col('Return').isNotNull())
+
+fund_returns_pd = \
+fund_returns \
+.drop('InvestmentVehicleID','TradingSymbol') \
+.toPandas()
+
+fund_returns_pd['Date'] = pd.to_datetime(
+fund_returns_pd['Date'],
+format='%Y-%m-%d')
+
+fund_returns_pd.set_index('Date')
+
+fund_returns_pd['Return'] = pd.to_numeric(
+fund_returns_pd['Return'],
+downcast='float')
+
+# COMMAND ----------
+
+# resample data to monthly
+
+returns_monthly = \
+fund_returns_pd \
+.set_index('Date') \
+.groupby('fund_acrnm_cd') \
+.resample('M') \
+.agg(lambda x: (x + 1).prod() - 1) 
+
+# COMMAND ----------
+
+annual_return_timeframes = [1, 3, 5, 10]
+
+for period in annual_return_timeframes:
+  returns_monthly['return_' + str(period) + 'y'] = returns_monthly.reset_index().set_index('Date').groupby(['fund_acrnm_cd'])['Return'].rolling(period * 12).agg(lambda x: (x + 1).prod() - 1) 
+  
+returns_monthly = returns_monthly.reset_index()
+
+returns_monthly['mo_num'] = pd.DatetimeIndex(returns_monthly['Date']).year * 100 + pd.DatetimeIndex(returns_monthly['Date']).month
+
+returns_monthly = returns_monthly.drop(['Return','Date'], axis=1)
+
+fund_returns_rolling = spark.createDataFrame(returns_monthly)
+
+# COMMAND ----------
+
+# MAGIC %md ### Output Base Data
 # MAGIC - only return records for our target fund / orgs
 
 # COMMAND ----------
 
 base_data = \
 financial_transaction \
+.select(
+  'trd_dt',
+  'fincl_txn_id',
+  'mo_num',
+  'rpo_ind',
+  'instn_ind',
+  'fund_acrnm_cd',
+  'org_nm_standard',
+  'fincl_itrmy_prson_id',
+  'rpc_terr_id',
+  'irm_terr_id',
+  'rtrmt_plan_id',
+  'rdmpt_amt',
+  'sls_amt',
+  'exchg_in_amt',
+  'exchg_out_amt',
+)\
 .filter(col('mo_num') > 201700) \
 .filter((col('rpo_ind') == 'Y') | (col('instn_ind') == 'Y')) \
 .join(
@@ -157,40 +277,10 @@ financial_transaction \
   on = 'mo_num',
   how = 'inner'
      ) \
-.select(
-  'fincl_txn_id',
-  'mo_num',
-  'rpo_ind',
-  'instn_ind',
-  'fund_acrnm_cd',
-  'org_nm_standard',
-  'fincl_itrmy_prson_id',
-  'rpc_terr_id',
-  'irm_terr_id',
-  'rtrmt_plan_id',
-  'rdmpt_amt',
-  'sls_amt',
-  'exchg_in_amt',
-  'exchg_out_amt',
-  'SentimentIndex',
-  'GDP',
-  'GoldPrice',
-  'HPIIndex',
-  'VIX_Open',
-  'VIX_High',
-  'VIX_Low',
-  'VIX_Close',
-  'OilPrice',
-  'TDSP',
-  'FODSP',
-  'TEDRate',
-  '3_Months_Yield',
-  '6_Months_Yield',
-  '1_Year_Yield',
-  '3_Year_Yield',
-  '5_Year_Yield',
-  '10_Year_Yield',
-  '20_Year_Yield'
+.join(
+  fund_returns_rolling,
+  on = ['mo_num','fund_acrnm_cd'],
+  how = 'inner'
 )
 
 # COMMAND ----------
@@ -220,6 +310,19 @@ base_data \
 
 # COMMAND ----------
 
+# MAGIC %md ### Trailing Redemptions
+# MAGIC - 3, 6, 12 mo averages
+
+# COMMAND ----------
+
+
+
+# COMMAND ----------
+
 base_data_agg \
 .write.format("delta").mode("overwrite").option("overwriteSchema", "true") \
 .saveAsTable("edp.base_data_agg")
+
+# COMMAND ----------
+
+
