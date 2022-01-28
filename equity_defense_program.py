@@ -56,14 +56,77 @@ firm_list = ['Edward Jones', 'LPL', 'Raymond James', 'Advisor Group', 'Merrill',
 
 # COMMAND ----------
 
-# MAGIC %md ### Financial Transaction Data
+# It seems we need to go back to original tables to aggregate at plan level:
+
+# Institutional: adl://adlseastus2lasr.azuredatalakestore.net/lasr/data/prepared/mss_pz_shared_ns/institutionaldatasales
+# IRIIS: MSS_M_SALESTRANSPARENCY_S.vwFinancialTransactionClassified
+
+inst = spark.read.parquet("adl://adlseastus2lasr.azuredatalakestore.net/lasr/data/prepared/mss_pz_shared_ns/institutionaldatasales")
+
+iriis = ReadLASR("MSS_M_SALESTRANSPARENCY_S.vwFinancialTransactionClassified")
 
 # COMMAND ----------
 
-table_list = ['financial_transaction', 'investment_vehicle', 'fincl_itrmy_org']
+standard_inst = \
+inst \
+.withColumnRenamed('monthnumber','month_number') \
+.withColumnRenamed('retirementplanid','retirement_plan_id') \
+.withColumnRenamed('organizationname','organization_name') \
+.withColumnRenamed('businessline1','business_line_1') \
+.withColumnRenamed('parentfundacronymgroup','parent_fund_acronym_group') \
+.withColumnRenamed('parentshareclassname','parent_share_class_name') \
+.groupBy(
+  'month_number',
+  'retirement_plan_id',
+  'organization_name',
+  'business_line_1',
+  'parent_fund_acronym_group',
+  'parent_share_class_name'
+) \
+.agg(
+  sum('saleamount').alias('sale_amount'),
+  sum('redemptionamount').alias('redemption_amount'),
+  sum('exchangeinamount').alias('exchange_in_amount'),
+  sum('exchangeoutamount').alias('exchange_out_amount')
+) \
+.withColumn('data_source',lit('inst'))
 
-for table in table_list:
-  globals()[table] = spark.read.parquet("adl://adlseastus2lasr.azuredatalakestore.net/lasr/data/prepared/mss_pz_shared_ns/" + table + "/")
+# COMMAND ----------
+
+standard_iriis = \
+iriis \
+.filter(col('BusinessLine1')=='IR') \
+.withColumnRenamed('MonthNumber','month_number') \
+.withColumnRenamed('RetirementPlanId','retirement_plan_id') \
+.withColumnRenamed('OrganizationName','organization_name') \
+.withColumnRenamed('BusinessLine1','business_line_1') \
+.withColumnRenamed('ParentFundAcronymGroup','parent_fund_acronym_group') \
+.withColumnRenamed('ParentShareClassName','parent_share_class_name') \
+.groupBy(
+  'month_number',
+  'retirement_plan_id',
+  'organization_name',
+  'business_line_1',
+  'parent_fund_acronym_group',
+  'parent_share_class_name'
+) \
+.agg(
+  sum('SaleAmount').alias('sale_amount'),
+  sum('RedemptionAmount').alias('redemption_amount'),
+  sum('ExchangeInAmount').alias('exchange_in_amount'),
+  sum('ExchangeOutAmount').alias('exchange_out_amount')
+) \
+.withColumn('data_source',lit('iriis'))
+
+# COMMAND ----------
+
+standard_redemptions = \
+standard_inst \
+.union(standard_iriis)
+
+# COMMAND ----------
+
+standard_redemptions.filter(col('month_number') ==201910).select('parent_fund_acronym_group').distinct().orderBy(col('parent_fund_acronym_group')).display()
 
 # COMMAND ----------
 
@@ -95,7 +158,7 @@ consumersentimentindex \
 .join(ted_spread, how = 'left', on = 'AsOfDate') \
 .join(treasury_yield, how = 'left', on = 'AsOfDate') \
 .withColumn('date',to_date(col("AsOfDate"),"MM-dd-yyyy")) \
-.withColumn('mo_num', year(col('date'))*lit(100)+month(col('date'))) \
+.withColumn('month_number', year(col('date'))*lit(100)+month(col('date'))) \
 .drop('AsOfDate','date')
 
 # remove spaces from column names
@@ -170,7 +233,7 @@ trading_symbols_data = [
   ('ICA', 'RICGX')
 ]
 
-cols = ["fund_acrnm_cd","TradingSymbol"]
+cols = ["parent_fund_acronym_group","TradingSymbol"]
 trading_symbols = spark.createDataFrame(data=trading_symbols_data, schema = cols)
 
 # COMMAND ----------
@@ -213,7 +276,7 @@ downcast='float')
 returns_monthly = \
 fund_returns_pd \
 .set_index('Date') \
-.groupby('fund_acrnm_cd') \
+.groupby('parent_fund_acronym_group') \
 .resample('M') \
 .agg(lambda x: (x + 1).prod() - 1) 
 
@@ -222,11 +285,11 @@ fund_returns_pd \
 annual_return_timeframes = [1, 3, 5, 10]
 
 for period in annual_return_timeframes:
-  returns_monthly['return_' + str(period) + 'y'] = returns_monthly.reset_index().set_index('Date').groupby(['fund_acrnm_cd'])['Return'].rolling(period * 12).agg(lambda x: (x + 1).prod() - 1) 
+  returns_monthly['return_' + str(period) + 'y'] = returns_monthly.reset_index().set_index('Date').groupby(['parent_fund_acronym_group'])['Return'].rolling(period * 12).agg(lambda x: (x + 1).prod() - 1) 
   
 returns_monthly = returns_monthly.reset_index()
 
-returns_monthly['mo_num'] = pd.DatetimeIndex(returns_monthly['Date']).year * 100 + pd.DatetimeIndex(returns_monthly['Date']).month
+returns_monthly['month_number'] = pd.DatetimeIndex(returns_monthly['Date']).year * 100 + pd.DatetimeIndex(returns_monthly['Date']).month
 
 returns_monthly = returns_monthly.drop(['Return','Date'], axis=1)
 
@@ -240,46 +303,16 @@ fund_returns_rolling = spark.createDataFrame(returns_monthly)
 # COMMAND ----------
 
 base_data = \
-financial_transaction \
-.select(
-  'trd_dt',
-  'fincl_txn_id',
-  'mo_num',
-  'rpo_ind',
-  'instn_ind',
-  'fund_acrnm_cd',
-  'org_nm_standard',
-  'fincl_itrmy_prson_id',
-  'rpc_terr_id',
-  'irm_terr_id',
-  'rtrmt_plan_id',
-  'rdmpt_amt',
-  'sls_amt',
-  'exchg_in_amt',
-  'exchg_out_amt',
-)\
-.filter(col('mo_num') > 201700) \
-.filter((col('rpo_ind') == 'Y') | (col('instn_ind') == 'Y')) \
-.join(
-  target_equity_funds \
-  .select('inv_veh_id', 'fund_acrnm_cd'),
-  on = 'inv_veh_id',
-  how = 'inner'
-     ) \
-.join(
-  target_org_ids \
-  .withColumnRenamed('fincl_itrmy_org_id', 'crdtd_to_org_id'),
-  on = 'crdtd_to_org_id',
-  how = 'inner'
-     ) \
+standard_redemptions \
+.filter(col('month_number') > 201700) \
 .join(
   macroeconomic_variables,
-  on = 'mo_num',
+  on = 'month_number',
   how = 'inner'
      ) \
 .join(
   fund_returns_rolling,
-  on = ['mo_num','fund_acrnm_cd'],
+  on = ['month_number','parent_fund_acronym_group'],
   how = 'inner'
 )
 
@@ -291,38 +324,19 @@ financial_transaction \
 
 # COMMAND ----------
 
-base_data \
-.write.format("delta").mode("overwrite").option("overwriteSchema", "true") \
-.saveAsTable("edp.base_data")
-
-# COMMAND ----------
-
-base_data_agg = \
-base_data \
-.groupBy(
-  'fund_acrnm_cd',
-  'org_nm_standard',
-  'mo_num',
-) \
-.agg(
-  sum('rdmpt_amt').alias('rdmpt_amt')
-)
-
-# COMMAND ----------
-
 # MAGIC %md ### Trailing Redemptions
 # MAGIC - 3, 6, 12 mo averages
 
 # COMMAND ----------
 
+trailing_periods = [3, 6, 12]
 
+for period in trailing_periods:
+  trailing_window = (Window.partitionBy('parent_fund_acronym_group','retirement_plan_id','organization_name','business_line_1','parent_share_class_name').orderBy('month_number').rangeBetween(-period, 0))
+  base_data = base_data.withColumn('avg_redemption_amount_lag_' + str(period) + '_months', avg("redemption_amount").over(trailing_window))
 
 # COMMAND ----------
 
-base_data_agg \
+base_data \
 .write.format("delta").mode("overwrite").option("overwriteSchema", "true") \
-.saveAsTable("edp.base_data_agg")
-
-# COMMAND ----------
-
-
+.saveAsTable("edp.base_data")
