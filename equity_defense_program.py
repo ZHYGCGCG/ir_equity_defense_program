@@ -4,29 +4,29 @@
 
 # COMMAND ----------
 
-# MAGIC %md ##To Do:
-# MAGIC #### Data
-# MAGIC - add returns data
-# MAGIC - add trailing window averages (by month)
-# MAGIC - lag of macroeconomic variables
-# MAGIC 
-# MAGIC ####Analysis
+# MAGIC %md ## CONAMRA
 # MAGIC - periods of high redemptions (above trailing averages)
 # MAGIC - correlation of macroeconomic with periods of high redemptions
 # MAGIC - money in motion, exchange in/out by asset category (where are equity assets going?)
 
 # COMMAND ----------
 
-# MAGIC %md ### Questions:
-# MAGIC ####New Fields that need to be explored (do these give us more coverage?)
-# MAGIC  - 'dervd_invsr_acct_num',
-# MAGIC  - 'dervd_clrd_thru_org_num',
-# MAGIC  - 'dervd_plan_ptcpt_id',
-# MAGIC  - 'dervd_brkr_idfct_num',
-# MAGIC  - 'dervd_rtrmt_plan_id',
-# MAGIC  
-# MAGIC ####Do we count exchange out as a redemption?
-# MAGIC ####Do we need to break this out by share class? (e.g. R2 can be high redemption while R6 is stable)
+# MAGIC %md 
+# MAGIC ## ZHYG
+# MAGIC 
+# MAGIC ### Treat all input/output as flows?
+# MAGIC - all negatives summed
+# MAGIC - all positive summed
+# MAGIC 
+# MAGIC ### Rank returns to peers rather than flat values
+# MAGIC - returns for each share class (we have sales at that level)
+# MAGIC 
+# MAGIC ### Lag of macroeconomic variables
+# MAGIC 
+# MAGIC ### Other fund measures (and lags)
+# MAGIC - sharpe, IV, vs benchmark, etc
+# MAGIC 
+# MAGIC ### Refactor Macroeconomic to use lambda func
 
 # COMMAND ----------
 
@@ -123,10 +123,6 @@ iriis \
 standard_redemptions = \
 standard_inst \
 .union(standard_iriis)
-
-# COMMAND ----------
-
-standard_redemptions.filter(col('month_number') ==201910).select('parent_fund_acronym_group').distinct().orderBy(col('parent_fund_acronym_group')).display()
 
 # COMMAND ----------
 
@@ -304,6 +300,7 @@ fund_returns_rolling = spark.createDataFrame(returns_monthly)
 
 base_data = \
 standard_redemptions \
+.filter((col('retirement_plan_id') != '#') & (col('retirement_plan_id') != 0)) \
 .filter(col('month_number') > 201700) \
 .join(
   macroeconomic_variables,
@@ -329,6 +326,9 @@ standard_redemptions \
 
 # COMMAND ----------
 
+# rolling period contains current month, we probably want only trailing not current
+# udpate 0 to -1 in rangeBetween()
+
 trailing_periods = [3, 6, 12]
 
 for period in trailing_periods:
@@ -340,3 +340,18 @@ for period in trailing_periods:
 base_data \
 .write.format("delta").mode("overwrite").option("overwriteSchema", "true") \
 .saveAsTable("edp.base_data")
+
+# COMMAND ----------
+
+# MAGIC %md ##End
+
+# COMMAND ----------
+
+# output to Tableau = 9.9m records..
+output = spark.table("edp.base_data")
+
+# COMMAND ----------
+
+output \
+.filter((col('retirement_plan_id') != '#') & (col('retirement_plan_id') != 0)) \
+.display()
