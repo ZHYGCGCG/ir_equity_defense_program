@@ -19,8 +19,6 @@
 # MAGIC ### Other fund measures (and lags)
 # MAGIC - sharpe, IV, vs benchmark, etc
 # MAGIC 
-# MAGIC ### Refactor Macroeconomic to use lambda func
-# MAGIC 
 # MAGIC ### Do we have holding data to do % redemptions of total holdings?
 # MAGIC 
 # MAGIC ### Plan sizing data?
@@ -381,10 +379,6 @@ standard_inst \
 
 # COMMAND ----------
 
-target_funds.display()
-
-# COMMAND ----------
-
 # MAGIC %md ### Fund Returns
 # MAGIC - computing seperately <a href="https://adb-3737625127627863.3.azuredatabricks.net/?o=3737625127627863#notebook/2096184987765418/command/2096184987765427">here</a>
 
@@ -424,37 +418,27 @@ standard_redemptions \
 
 # COMMAND ----------
 
-# MAGIC %md ### Backfill missing data
+# MAGIC %md ### Forward fill null values
 # MAGIC - macroeconomic data can be quarterly
 
 # COMMAND ----------
 
-base_data.display()
-
-# COMMAND ----------
-
-keys = ['parent_fund_acronym_group','retirement_plan_id','organization_name','business_line_1','parent_share_class_name','morningstar_category_grouped']
+keys = ['parent_fund_acronym_group','retirement_plan_id','organization_name_standard','business_line_1','parent_share_class_name','morningstar_category_grouped','data_source','investment_vehicle_id']
 
 window = Window.partitionBy(keys)\
                .orderBy('month_number')\
                .rowsBetween(-sys.maxsize, 0)
 
-base_data \
-.withColumn('GDP',last(col('GDP'), ignorenulls=True).over(window)) \
-.display()
-
-# COMMAND ----------
-
-# define the window
-window = Window.partitionBy('location')\
-               .orderBy('time')\
-               .rowsBetween(-sys.maxsize, 0)
-
-# define the forward-filled column
-filled_column = last(spark_df['temperature'], ignorenulls=True).over(window)
-
-# do the fill
-spark_df_filled = spark_df.withColumn('temp_filled_spark', filled_column)
+for column in (set(base_data.columns) - set(keys)):
+  # forward fill
+  base_data = \
+  base_data \
+  .withColumn(column, last(col(column), ignorenulls=True).over(window))
+  
+  # back fill (do both to fill in null records that occur first)
+  base_data = \
+  base_data \
+  .withColumn(column, first(col(column), ignorenulls=True).over(window))
 
 # COMMAND ----------
 
